@@ -1,0 +1,51 @@
+# update this dir struct every time i add new news
+
+changanya/
++-- .venv/                  - Python virtual environment for local development
++-- artwork/                - song artwork assets
++-- changanya-ui/           - Tauri desktop application
+|   +-- .vscode/
+|   +-- dist/               - built frontend output
+|   +-- node_modules/       - installed JS dependencies (generated)
+|   +-- public/
+|   +-- src/                - React frontend source
+|   +-- src-tauri/          - Rust/Tauri backend
+|   |   +-- icons/
+|   |   +-- src/
+|   |   |   +-- main.rs     - Tauri entry point
+|   |   +-- target/         - Rust build artifacts (generated)
+|   |   +-- Cargo.toml
+|   |   +-- Cargo.lock
+|   |   +-- tauri.conf.json
+|   +-- package.json
+|   +-- package-lock.json
+|   +-- tsconfig.json
+|   +-- tsconfig.node.json
+|   +-- vite.config.ts
+|   +-- README.md
++-- src/                    - Python backend source
+|   +-- catalog/
+|   +-- db/
+|   +-- event_store/
+|   +-- playback/
+|   +-- preference_model/
+|   +-- scanner/
+|   +-- scorer/
+|   +-- selector/
+|   +-- shuffle_engine/
++-- tests/                  - Python tests
++-- .gitignore
++-- ALBUM_PLAYBACK_DOCUMENTATION.md
++-- CHAT_SESSION_SUMMARY.md
++-- changanya.db            - application SQLite database
++-- check_db.py
++-- cleanup_metadata.py
++-- debug.log
++-- extract_art.py
++-- ipc.py                  - Python IPC launcher for Tauri
++-- package-lock.json
++-- play.py
++-- requirements.txt
++-- reset_cleanup.py
++-- scan.py
++-- structure.txt

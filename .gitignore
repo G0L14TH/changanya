@@ -1,0 +1,22 @@
+# Virtual environment — never commit this
+.venv/
+
+# Python compiled bytecode — generated automatically, not source code
+__pycache__/
+*.pyc
+*.pyo
+
+# Our database file — this is runtime data, not source code
+*.db
+*.sqlite
+
+# Editor folders
+.vscode/
+.idea/
+
+# macOS folder metadata
+.DS_Store
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
