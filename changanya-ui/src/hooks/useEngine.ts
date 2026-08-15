@@ -99,6 +99,24 @@ export interface LibraryData {
   albums:  LibraryAlbum[];
 }
 
+// Shape of the raw "now_playing" event payload as sent by ipc.py's
+// _emit_now_playing(). Kept separate from Track because the wire
+// payload is snake_case and carries engine-level fields (shuffle,
+// album mode) alongside the track fields.
+interface NowPlayingPayload {
+  id: string;
+  title: string;
+  artist: string;
+  album: string;
+  year: number | null;
+  duration_ms: number;
+  artwork_path: string | null;
+  liked: boolean;
+  album_mode?: boolean;
+  shuffle_enabled?: boolean;
+  album_shuffle_enabled?: boolean;
+}
+
 export function useEngine() {
   const [state, setState] = useState<EngineState>({
     currentTrack: null,
@@ -154,17 +172,47 @@ export function useEngine() {
                 setState(s => ({ ...s, status: "Engine ready" }));
                 invoke("get_state").catch(console.error);
                 invoke("get_home_data").catch(console.error);
+                invoke("set_global_shuffle", {enabled: true}).catch(console.error);
                 break;
 
-              case "now_playing":
+              case "now_playing": {
+                const data = parsed.data as NowPlayingPayload;
                 setState(s => ({
                   ...s,
-                  currentTrack: parsed.data as Track,
+                  currentTrack: {
+                    id: data.id,
+                    title: data.title,
+                    artist: data.artist,
+                    album: data.album,
+                    year: data.year,
+                    duration_ms: data.duration_ms,
+                    artwork_path: data.artwork_path,
+                    liked: data.liked,
+                    shuffleEnabled: data.shuffle_enabled ?? s.shuffleEnabled,
+                    albumMode: data.album_mode === true,
+                    albumShuffleEnabled: data.album_shuffle_enabled ?? s.albumShuffleEnabled,
+                  },
                   isPlaying:    true,
                   status:       "Playing",
                   progressMs:   0,
+                  // FIX: the engine has always sent authoritative shuffle
+                  // and album-mode state on every now_playing payload
+                  // (startup, get_state, every song change), but this
+                  // handler previously threw those fields away and only
+                  // updated currentTrack/isPlaying/status/progressMs. That
+                  // meant the shuffle toggle only ever reflected the last
+                  // explicit shuffle_changed/album_shuffle_changed event
+                  // (or this hook's own default of `true`), and could
+                  // silently drift out of sync with what the engine was
+                  // actually doing — most visibly right at startup, where
+                  // the UI showed shuffle "on" while the engine defaulted
+                  // to a different value.
+                  shuffleEnabled: data.shuffle_enabled ?? s.shuffleEnabled,
+                  albumMode: data.album_mode === true,
+                  albumShuffleEnabled: data.album_shuffle_enabled ?? s.albumShuffleEnabled,
                 }));
                 break;
+              }
 
               case "queue_update":
                 setState(s => ({

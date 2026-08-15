@@ -43,7 +43,15 @@ class ShuffleEngine:
         self._album_queue:   list[Song]           = []
         self._album_shuffle_enabled: bool         = False
         self._original_album_queue: list[Song]    = []
-        self._global_shuffle_enabled: bool        = False
+        # FIX: this used to default to False while the frontend
+        # (useEngine.ts EngineState) defaults shuffleEnabled to True.
+        # Nothing ever reconciled the two on startup — the toggle only
+        # ever updated in response to an explicit user click — so the
+        # UI showed shuffle "on" while the engine was actually
+        # selecting non-shuffled from the very first song. Defaulting
+        # both sides to True keeps them truthful until proven
+        # otherwise by an explicit toggle.
+        self._global_shuffle_enabled: bool        = True
 
         print(f"  Session started: {self.session.get_id()[:8]}...")
 
@@ -116,6 +124,17 @@ class ShuffleEngine:
         """Enable or disable the global shuffle mode."""
         with self._lock:
             self._global_shuffle_enabled = enabled
+            # FIX: invalidate any prefetched "next song" — it was chosen
+            # under the *previous* shuffle setting by a background thread
+            # right after the current song started, before the user ever
+            # touched this toggle. Without clearing it, flipping shuffle
+            # has zero audible effect until the *second* song after the
+            # click, which reads as "shuffle doesn't work."
+            self._prefetched = None
+
+        # Re-prime the prefetch immediately under the new setting so the
+        # very next track already reflects it by the time this one ends.
+        threading.Thread(target=self._prefetch_next, daemon=True).start()
 
         try:
             if hasattr(self, "_emit_now_playing"):
@@ -336,10 +355,19 @@ class ShuffleEngine:
             self._prefetched = chosen
 
     def _select_next_song(self) -> Optional[ScoredSong]:
-        """Score all songs and select the next one."""
-        from src.scorer.scorer import get_unplayed_songs
-        from src.scorer.models import ScoringContext
+        """
+        Select next song based on shuffle state.
+        Shuffle ON -> intelligent weighed random with exploration
+        Shuffle OFF -> sequential library order advances through all songs
+        alphabetically wraps around at the end of library
+        """
 
+        if not self._global_shuffle_enabled:
+            return self._sequential_select()
+
+        # Shuffle ON - intelligent selection
+        from src.scorer.scorer import get_unplayed_songs
+        
         scored   = score_all_songs(self.conn)
         context  = build_scoring_context(self.conn)
 
@@ -374,6 +402,48 @@ class ShuffleEngine:
             filtered,
             exploration_songs=exploration_pool,
             exploration_rate=0.20,
+        )
+    
+    def _sequential_select(self) -> Optional[ScoredSong]:
+        """
+        Pick next song in alphabetical library order.
+        Advances position from current song, wraps at end.
+        Excludes recordings.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM songs
+            WHERE is_recording = 0
+            ORDER BY COALESCE(display_title, title, file_path)
+            """
+        ).fetchall()
+
+        if not rows:
+            return None
+
+        from src.catalog.models import Song as _Song
+
+        current_id    = self._current_song.id if self._current_song else None
+        current_index = 0
+
+        if current_id:
+            for i, row in enumerate(rows):
+                if row["id"] == current_id:
+                    current_index = i
+                    break
+
+        next_index = (current_index + 1) % len(rows)
+        next_row   = rows[next_index]
+        song       = _Song.from_db_row(next_row)
+
+        return ScoredSong(
+            song=             song,
+            final_score=      1.0,
+            preference_score= 1.0,
+            recency_score=    1.0,
+            artist_score=     1.0,
+            genre_score=      1.0,
         )
 
     def _handle_player_event(self, event: TrackEvent) -> None:

@@ -247,7 +247,7 @@ export default function App() {
                 <Queue
                   items={state.queue}
                   onPlayItem={(id) => {
-                    if (state.currentTrack?.albumMode && state.currentTrack.album && state.currentTrack.artist) {
+                    if (state.albumMode && state.currentTrack?.album && state.currentTrack?.artist) {
                       playAlbumTrack(state.currentTrack.album, state.currentTrack.artist, id);
                     } else {
                       playSpecific(id);

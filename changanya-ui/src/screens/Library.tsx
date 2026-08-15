@@ -1,4 +1,3 @@
-
 import { useEffect, useState } from "react";
 import AlbumArt from "../components/AlbumArt";
 import {
@@ -377,7 +376,12 @@ export default function Library({
             key={song.id}
             onMouseEnter={() => setHovered(song.id)}
             onMouseLeave={() => setHovered(null)}
-            onClick={() => onPlaySong(song.id)}
+            // FIX: row used to fire onPlaySong on a single click, which
+            // meant any click anywhere in the row — including misclicks
+            // while just browsing — started playback. Play now only
+            // triggers from the dedicated hover play-icon button (below)
+            // or an explicit double-click on the row.
+            onDoubleClick={() => onPlaySong(song.id)}
             style={rowStyle(song.id)}
           >
             <div style={{ width: 36, height: 36, flexShrink: 0 }}>
@@ -679,7 +683,12 @@ export default function Library({
                       key={song.id}
                       onMouseEnter={() => setHovered(song.id)}
                       onMouseLeave={() => setHovered(null)}
-                      onClick={() => handlePlayAlbumTrack(song.id)}
+                      // FIX: same issue as the Songs tab — a single click
+                      // anywhere on the row used to start album playback
+                      // from that track. Now only the hover play icon
+                      // (single click) or an explicit double-click on the
+                      // row triggers playback.
+                      onDoubleClick={() => handlePlayAlbumTrack(song.id)}
                       style={{
                         display: "flex",
                         alignItems: "center",

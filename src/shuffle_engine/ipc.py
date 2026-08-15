@@ -9,6 +9,7 @@
 # exactly as built.
 
 import json
+import random
 import sys
 import threading
 import time
@@ -283,11 +284,14 @@ class IPCEngine(ShuffleEngine):
     def _play_next(self) -> None:
         was_album = self._album_mode
         super()._play_next()
-        #notify UI when album mode ends
+        # notify UI when album mode ends
         if was_album and not self._album_mode:
             emit("album_mode_changed", {"enabled": False})
-            emit("queue-update", {"upcoming": []})
-            
+            # FIX: this was "queue-update" (hyphen) which never matched the
+            # "queue_update" (underscore) case the frontend listens for, so
+            # the queue never got cleared when an album finished.
+            emit("queue_update", {"upcoming": []})
+
     def _handle_player_event(self, event) -> None:
         # Run the normal engine logic first
         super()._handle_player_event(event)
@@ -316,26 +320,64 @@ class IPCEngine(ShuffleEngine):
             emit("status", {"message": "loading"})
             return
 
-        emit(
-            "now_playing",
-            {
-                "id": sanitise(song.id),
-                "title": sanitise(song.title),
-                "artist": sanitise(song.artist),
-                "album": sanitise(song.album),
-                "year": song.year,
-                "duration_ms": song.duration_ms or 0,
-                "artwork_path": self._get_artwork_path(song.id),
-                "liked": _is_liked(self.conn, song.id),
-                "album_mode": getattr(self, "_album_mode", False),
-                "shuffle_enabled": getattr(self, "_global_shuffle_enabled", False),
-                "album_shuffle_enabled": getattr(self, "_album_shuffle_enabled", False),
-            },
-        )
+        emit("now_playing", {
+            "id":           sanitise(song.id),
+            "title":        sanitise(song.display_title or song.title),
+            "artist":       sanitise(song.artist) if song.artist else "Unknown Artist",
+            "album":        sanitise(song.album)  if song.album  else "Unknown Album",
+            "duration_ms":  song.duration_ms or 0,
+            "artwork_path": self._get_artwork_path(song.id),
+            "liked":        _is_liked(self.conn, song.id),
+            "album_mode": self._album_mode,
+        })
 
-        # Emit queue separately in a background thread
-        # so that UI updates instantly without waiting for scoring
-        threading.Thread(target=self._emit_queue, daemon=True).start()
+        # Build queue synchronously — no background thread
+        try:
+            if self._album_mode and self._album_queue:
+                # Album mode — show remaining album songs
+                upcoming = []
+                for s in list(self._album_queue)[:5]:
+                    upcoming.append({
+                        "id":           sanitise(s.id),
+                        "title":        sanitise(s.display_title or s.title),
+                        "artist":       sanitise(s.artist) if s.artist else "Unknown Artist",
+                        "score":        1.0,
+                        "reason":       "album queue",
+                        "artwork_path": self._get_artwork_path(s.id),
+                    })
+                emit("queue_update", {"upcoming": upcoming})
+                return
+
+            # Normal shuffle mode — score and select
+            from src.scorer.scorer import score_all_songs
+            from src.selector.selector import select_next_n_songs
+            from src.selector.diversity import apply_hard_filters
+
+            scored   = score_all_songs(self.conn)
+            filtered = apply_hard_filters(
+                scored,
+                last_song_id=song.id,
+                last_artist=song.artist,
+            )
+            upcoming_scored = select_next_n_songs(filtered, n=5)
+
+            emit("queue_update", {
+                "upcoming": [
+                    {
+                        "id":           sanitise(s.song.id),
+                        "title":        sanitise(s.song.display_title or s.song.title),
+                        "artist":       sanitise(s.song.artist) if s.song.artist else "Unknown Artist",
+                        "score":        round(s.final_score, 2),
+                        "reason":       sanitise(s.reasoning()),
+                        "artwork_path": self._get_artwork_path(s.song.id),
+                    }
+                    for s in upcoming_scored
+                ]
+            })
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            emit("error", {"message": f"queue emit failed: {str(e)}"})
 
     def _emit_queue(self) -> None:
         """Score and emit the upcoming queue; runs in the background."""
@@ -344,49 +386,75 @@ class IPCEngine(ShuffleEngine):
             if not song:
                 return
 
-            # Album mode - emit remaining album songs, not shuffle picks
+            # Album mode - emit remaining album songs, not shuffle picks.
+            #
+            # FIX: `return` used to sit *inside* the for-loop, so this bailed
+            # out after appending a single song and never called emit() at
+            # all. It also meant the scoring branch below was unreachable
+            # from anywhere, since this whole thing lived under one
+            # `if self._album_mode and self._album_queue:` with no `else` —
+            # so non-album playback never emitted a queue_update either.
             if self._album_mode and self._album_queue:
                 upcoming = []
-                for s in self._album_queue[:5]:
-                    art_path = self._get_artwork_path(s.id)
+                # NOTE: no [:5] slice here on purpose — album mode should
+                # emit the full remaining album queue, unlike the capped
+                # 5-song recommendation queue below. The slice was
+                # copy-pasted from that branch and was truncating every
+                # album to its first 5 tracks.
+                for s in self._album_queue:
                     upcoming.append({
                         "id": sanitise(s.id),
                         "title": sanitise(s.display_title or s.title),
-                        "artist": sanitise(s.artist) if s.artist else "Uknown Artist",
+                        "artist": sanitise(s.artist) if s.artist else "Unknown Artist",
                         "score": 1.0,
                         "reason": "Album queue",
-                        "artwork_path": art_path,
+                        "artwork_path": self._get_artwork_path(s.id),
                     })
-                    return
-                
-                # Normal shuffle mode - score and pick
-                from src.scorer.scorer import score_all_songs
-                from src.selector.selector import select_next_n_songs
-                from src.selector.diversity import apply_hard_filters
+                emit("queue_update", {"upcoming": upcoming})
+                return
 
-                scored = score_all_songs(self.conn)
-                filtered = apply_hard_filters(
-                    scored,
-                    last_song_id=song.id,
-                    last_artist=song.artist,
-                )
+            # Normal (non-album) mode - build the preview queue
+            from src.scorer.scorer import score_all_songs
+            from src.selector.selector import select_next_n_songs
+            from src.selector.diversity import apply_hard_filters
+
+            scored = score_all_songs(self.conn)
+            filtered = apply_hard_filters(
+                scored,
+                last_song_id=song.id,
+                last_artist=song.artist,
+            )
+
+            # FIX: this used to always call select_next_n_songs() (the
+            # weighted/scored picker) no matter what, so the "up next"
+            # panel never visibly changed when shuffle was toggled — even
+            # when actual playback selection (_select_next_song in
+            # engine.py) really was randomized. Mirror that same branch
+            # here so the displayed queue matches what will actually play.
+            if getattr(self, "_global_shuffle_enabled", False):
+                sample_size = min(5, len(filtered))
+                upcoming_scored = random.sample(filtered, sample_size) if sample_size else []
+                reason_for = lambda s: "Shuffle"
+            else:
                 upcoming_scored = select_next_n_songs(filtered, n=5)
+                reason_for = lambda s: s.reasoning()
 
-                emit("queue_update", {
-                    "upcoming": [
-                        {
-                            "id": sanitise(s.song.id),
-                            "title": sanitise(s.song.display_title or s.song.title),
-                            "artist":sanitise(s.song.artist) if s.song.artist else "Unknown Artist",
-                            "score": round(s.final_score, 2),
-                            "reason": sanitise(s.reasoning()),
-                            "artwork_path": self._get_artwork_path(s.song.id),
-                        }
-                        for s in upcoming_scored
-                    ]
-                })
+            emit("queue_update", {
+                "upcoming": [
+                    {
+                        "id": sanitise(s.song.id),
+                        "title": sanitise(s.song.display_title or s.song.title),
+                        "artist": sanitise(s.song.artist) if s.song.artist else "Unknown Artist",
+                        "score": round(s.final_score, 2),
+                        "reason": sanitise(reason_for(s)),
+                        "artwork_path": self._get_artwork_path(s.song.id),
+                    }
+                    for s in upcoming_scored
+                ]
+            })
         except Exception as e:
             emit("error", {"message": f"queue emit failed: {e}"})
+
 
 def _emit_library_songs(conn, sort_by: str = "title") -> None:
     """Emit all non-recording songs sorted by the given field."""
@@ -637,17 +705,39 @@ def run_ipc() -> None:
                 if song_id:
                     liked = _is_liked(engine.conn, song_id)
                     emit("like_status", {"song_id": song_id, "liked": liked})
-                    
+
             elif action == "set_global_shuffle":
-                enabled = command.get("enabled", True)
-                engine._shuffle_enabled = enabled
+                # FIX: this used to write `engine._shuffle_enabled` directly,
+                # but every other read of shuffle state (see
+                # `_emit_now_playing`) checks `engine._global_shuffle_enabled`
+                # instead. Those are two different attributes, so the toggle
+                # click was emitting a correct event once, then getting
+                # overwritten back to the old value on the very next
+                # now_playing/get_state emission. Routing through the
+                # engine's own setter keeps the attribute name (and any
+                # related bookkeeping inside the engine) consistent.
+                enabled = bool(command.get("enabled", True))
+                engine.set_global_shuffle(enabled)
                 emit("shuffle_changed", {"enabled": enabled})
 
+                # Immediately update the queue to reflect new shuffle state
+                # It reorders the Up Next list 
+                try:
+                    engine._emit_now_playing()
+                except Exception as e:
+                    emit ("error", {"message": f"shuffle queue update failed: {str(e)}"})
+
             elif action == "set_album_shuffle":
-                enabled = command.get("enabled", True)
+                enabled = bool(command.get("enabled", True))
                 engine.set_album_shuffle(enabled)
                 emit("album_shuffle_changed", {"enabled": enabled})
-                
+
+                # Imeediately update queue to show reordered album songs
+                try: 
+                    engine._emit_now_playing()
+                except Exception as e:
+                    emit("error", {"message": f"album shuffle update failed: {str(e)}"})
+
             elif action == "set_volume":
                 vol = command.get("volume", 75)
                 engine.player.set_volume(int(vol))
@@ -670,10 +760,10 @@ def run_ipc() -> None:
                 album  = command.get("album", "")
                 artist = command.get("artist", "")
                 _emit_album_songs(conn, album, artist)
-                
+
             elif action == "get_home_data":
                 _emit_home_data(engine.conn)
-            
+
             elif action == "play_specific":
                 song_id = command.get("song_id")
                 if song_id:
@@ -687,15 +777,6 @@ def run_ipc() -> None:
                 emit("album_mode_changed", {"enabled": True})
                 emit("album_shuffle_changed", {"enabled": shuffle})
                 emit("shuffle_changed", {"enabled": False})
-
-
-            elif action == "set_shuffle":
-                enabled = bool(command.get("enabled", False))
-                engine.set_global_shuffle(enabled)
-
-            elif action == "set_album_shuffle":
-                enabled = bool(command.get("enabled", False))
-                engine.set_album_shuffle(enabled)
 
             elif action == "edit_album_tags":
                 album = command.get("album", "")
